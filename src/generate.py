@@ -5,7 +5,7 @@ import torch
 from math import exp
 from scipy.special import softmax
 from retriever import BM25, SGPT
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 
 logging.basicConfig(level=logging.INFO) 
 logger = logging.getLogger(__name__)
@@ -16,10 +16,24 @@ nlp = spacy.load("en_core_web_sm")
 class BasicGenerator:
     def __init__(self, model_name_or_path):
         logger.info(f"Loading model from {model_name_or_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, 
+            # use_auth_token=True
+        )
         self.model_config = AutoConfig.from_pretrained(model_name_or_path,
                     trust_remote_code = "falcon" in model_name_or_path)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path, device_map="auto", 
+        # 8bit quantization
+        self.quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True
+        )
+
+        self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path, 
+                    # max_memory={0: "10GB", "cpu": "30GB"}, low_cpu_mem_usage=True,
+                    device_map="auto", 
+                    # use_auth_token=True,
+                    quantization_config = self.quantization_config, offload_folder="offload",  
                     trust_remote_code = "falcon" in model_name_or_path)
         if self.model_config.model_type == "llama":
             self.space_token = "▁"
@@ -530,7 +544,9 @@ class AttnWeightRAG(BasicRAG):
         input_ids = self.generator.tokenizer.encode(all_text, return_tensors="pt")
         input_length = input_ids.shape[1]
         tokens_tmp = self.generator.tokenizer.convert_ids_to_tokens(input_ids[0])
-
+        # Before line 545 in generate.py
+        input_ids = input_ids.to(self.generator.model.device)
+        atten_tmp = self.generator.model(input_ids, output_attentions=True).attentions[-1][0]
         atten_tmp = self.generator.model(input_ids, output_attentions=True).attentions[-1][0]
 
         # merge tokens
