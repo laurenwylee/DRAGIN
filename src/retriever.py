@@ -72,24 +72,29 @@ class BM25:
         # prepare outputs
         docids: List[str] = []
         docs: List[str] = []
+        scores: List[float] = []
         for qid, query in enumerate(queries):
             _docids: List[str] = []
             _docs: List[str] = []
+            _scores: List[float] = []
             if qid in results:
                 for did, (score, text) in results[qid].items():
                     _docids.append(did)
                     _docs.append(text)
+                    _scores.append(score)
                     if len(_docids) >= topk:
                         break
             if len(_docids) < topk:  # add dummy docs
                 _docids += [get_random_doc_id() for _ in range(topk - len(_docids))]
                 _docs += [''] * (topk - len(_docs))
+                _scores += [0.0] * (topk - len(_scores))
             docids.extend(_docids)
             docs.extend(_docs)
+            scores.extend(_scores)
 
         docids = np.array(docids).reshape(bs, topk)  # (bs, topk)
         docs = np.array(docs).reshape(bs, topk)  # (bs, topk)
-        return docids, docs
+        return docids, docs, scores
 
 
 def bm25search_search(self, corpus: Dict[str, Dict[str, str]], queries: Dict[str, str], top_k: int, *args, **kwargs) -> Dict[str, Dict[str, float]]:
@@ -334,12 +339,19 @@ class SGPT:
         global_topk_values, global_topk_indices = torch.topk(all_topk_values, k=topk, dim=0)
 
         psgs = []
+        scores = []
         for qid in range(q_reps.shape[0]):
-            ret = []
+            # ret = []
+            docs = []
+            scores_i = []
             for j in range(topk):
                 idx = global_topk_indices[j][qid].item()
+                score = global_topk_values[j, qid].item()
                 fid, rk = idx // topk, idx % topk
-                psg = self.docs[topk_indices_list[fid][rk][qid]]
-                ret.append(psg)
-            psgs.append(ret)
-        return psgs
+                # .item()
+                psg = self.docs[topk_indices_list[fid][rk][qid].item()]
+                docs.append(psg)
+                scores_i.append(score)
+            psgs.append(doc)
+            scores.append(scores_i)
+        return psgs, scores

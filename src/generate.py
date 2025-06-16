@@ -210,6 +210,17 @@ class BasicRAG:
                     sgpt_encode_file_path = self.sgpt_encode_file_path,
                     passage_file = self.passage_file
                 )
+            elif self.retriever_type == "hybrid":
+                self.lex_retriever = BM25(
+                    tokenizer = self.generator.tokenizer,
+                    index_name = "wiki" if "es_index_name" not in args else self.es_index_name,
+                    engine = "elasticsearch"
+                )
+                self.dense_retriever = SGPT(
+                    model_name_or_paht = self.sgpt_nodel_name_or_path,
+                    sgpt_encode_file_path = self.sgpt_encode_file_path,
+                    passage_file = self.passage_file
+                )
             else:
                 raise NotImplementedError
         
@@ -218,18 +229,58 @@ class BasicRAG:
     def retrieve(self, query, topk=1, max_query_length=64):
         self.counter.retrieve += 1
         if self.retriever_type == "BM25":
-            _docs_ids, docs = self.retriever.retrieve(
+            _docs_ids, docs, _ = self.retriever.retrieve(
                 queries = [query], 
                 topk = topk, 
                 max_query_length = max_query_length,
             )
             return docs[0]
         elif self.retriever_type == "SGPT":
-            docs = self.retriever.retrieve(
+            docs, _ = self.retriever.retrieve(
                 queries = [query], 
                 topk = topk,
             )
             return docs[0] 
+        elif self.retriever_type == "hybrid":
+            k1 = int(topk * self.retriever_ratio)
+            k2 = topk - k1
+
+            # bm25 half
+            lex_id, lex_docs, lex_scors = self.lex_retriever.retrieve(
+                queries = [query],
+                topk = k1, 
+                max_query_length = max_query_length
+            )
+            lex_docs = lex_docs[0]
+
+            # bm25 l2 normalization
+            lex_scores = np.array(lex_scores[0], dtype = float)
+            norm_b = np.linalg.norm(lex_scores) + 1e-12
+            lex_scores /= norm_b
+
+            # sgpt half
+            dense_docs, dense_scores = self.dense_retriever.retrieve(
+                queries = [query], 
+                topk = k2
+            )
+            dense_docs = dense_docs[0]
+            
+            # sgpt l2 normalization
+            dense_scores = np.array(dense_scores[0], dtype = float)
+            norm_s = np.linalg.norm(dense_scores) + 1e-12
+            dense_scores /= norm_s
+
+            # takes topk docs based on normalized score of dense and lex retrieval
+            merged = {}
+            alpha = self.retriever_ratio
+            for doc, score in zip(lex_docs, lex_scores):
+                merge[doc] = alpha * score
+            for doc, score in zip(dense_docs, dense_docs):
+                merge[doc] = merge.get(doc, 0.0) + (1 - alpha) * score
+
+           sorted_merge = sorted(merge.items(), key = lambda n: n[1], reverse=True)
+           top = [doc  for doc,_ in sorted_merge[:topk]]
+           return top
         else:
             raise NotImplementedError
     
