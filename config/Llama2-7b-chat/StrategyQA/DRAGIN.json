@@ -11,6 +11,7 @@
     "retrieve_keep_top_k": 35,
     "output_dir": "../result/llama2_7b_chat_strategyqa",
     "retriever": "BM25",
+    "retriever_ratio": 0.5,
     "es_index_name": "wiki",
     "retrieve_topk": 3,
     "hallucination_threshold": 0.75,
