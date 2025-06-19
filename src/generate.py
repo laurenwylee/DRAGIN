@@ -217,7 +217,7 @@ class BasicRAG:
                     engine = "elasticsearch"
                 )
                 self.dense_retriever = SGPT(
-                    model_name_or_paht = self.sgpt_nodel_name_or_path,
+                    model_name_or_path = self.sgpt_model_name_or_path,
                     sgpt_encode_file_path = self.sgpt_encode_file_path,
                     passage_file = self.passage_file
                 )
@@ -246,7 +246,7 @@ class BasicRAG:
             k2 = topk - k1
 
             # bm25 half
-            lex_id, lex_docs, lex_scors = self.lex_retriever.retrieve(
+            lex_id, lex_docs, lex_scores = self.lex_retriever.retrieve(
                 queries = [query],
                 topk = k1, 
                 max_query_length = max_query_length
@@ -254,7 +254,7 @@ class BasicRAG:
             lex_docs = lex_docs[0]
 
             # bm25 l2 normalization
-            lex_scores = np.array(lex_scores[0], dtype = float)
+            lex_scores = np.array(lex_scores, dtype = float)
             norm_b = np.linalg.norm(lex_scores) + 1e-12
             lex_scores /= norm_b
 
@@ -266,7 +266,7 @@ class BasicRAG:
             dense_docs = dense_docs[0]
             
             # sgpt l2 normalization
-            dense_scores = np.array(dense_scores[0], dtype = float)
+            dense_scores = np.array(dense_scores, dtype = float)
             norm_s = np.linalg.norm(dense_scores) + 1e-12
             dense_scores /= norm_s
 
@@ -274,13 +274,13 @@ class BasicRAG:
             merged = {}
             alpha = self.retriever_ratio
             for doc, score in zip(lex_docs, lex_scores):
-                merge[doc] = alpha * score
+                merged[doc] = alpha * score
             for doc, score in zip(dense_docs, dense_docs):
-                merge[doc] = merge.get(doc, 0.0) + (1 - alpha) * score
-
-           sorted_merge = sorted(merge.items(), key = lambda n: n[1], reverse=True)
-           top = [doc  for doc,_ in sorted_merge[:topk]]
-           return top
+                merged[doc] = merged.get(doc, 0.0) + (1 - alpha) * score
+            
+            sorted_merge = sorted(merged.items(), key = lambda n: n[1], reverse=True)
+            top = [doc  for doc,_ in sorted_merge[:topk]]
+            return top
         else:
             raise NotImplementedError
     
