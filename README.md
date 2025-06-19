@@ -4,6 +4,20 @@
 Implement a Hybrid Retriever with a retriever ratio in configuration to determine the weight of the BM25 retriever over the SGPT retriever.
 
 First experiments testing on Llama2-7b-chat and Vicuna-13b-v1.5 models using DRAGIN.
+
+Next:
+Two-Stage Retrieval -- run one retrieve for broad context, then for each top document run second retrieval for more specific retrieval.
+
+Code sketch (in your hybrid branch):
+
+python
+Copy
+Edit
+# 1st stage: get top-k1 from BM25
+_, docs1, _ = self.lex_retriever.retrieve([query], topk=k1)
+docs1 = docs1[0]
+
+# 2nd stage: for each docs1[i], retrieve k2/k1 passages
 ## Original
 
 **📢 January 18, 2025 Update, Important:**
