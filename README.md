@@ -4,8 +4,6 @@
 Implement a Hybrid Retriever with a retriever ratio in configuration to determine the weight of the BM25 retriever over the SGPT retriever.
 
 First experiments testing on Llama2-7b-chat and Vicuna-13b-v1.5 models using DRAGIN.
-
-First retriever ratio: 0.5
 ## Original
 
 **📢 January 18, 2025 Update, Important:**
