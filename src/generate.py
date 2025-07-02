@@ -242,45 +242,67 @@ class BasicRAG:
             )
             return docs[0] 
         elif self.retriever_type == "hybrid":
+            # # hyperparameters: retriever_ratio is the split of bm25 vs spgt documents 
+            # # and retriever_score_weight is the ratio weight given to each bm25/spgt score
+
+            # let retriever ratio be the split
             k1 = int(topk * self.retriever_ratio)
             k2 = topk - k1
 
-            # bm25 half
-            lex_id, lex_docs, lex_scores = self.lex_retriever.retrieve(
-                queries = [query],
-                topk = k1, 
-                max_query_length = max_query_length
-            )
-            lex_docs = lex_docs[0]
+            # # bm25 half
+            # lex_id, lex_docs, lex_scores = self.lex_retriever.retrieve(
+            #     queries = [query],
+            #     topk = k1, 
+            #     max_query_length = max_query_length
+            # )
+            # lex_docs = lex_docs[0]
 
-            # bm25 l2 normalization
-            lex_scores = np.array(lex_scores, dtype = float)
-            norm_b = np.linalg.norm(lex_scores) + 1e-12
-            lex_scores /= norm_b
+            # # bm25 l2 normalization
+            # lex_scores = np.array(lex_scores, dtype = float)
+            # norm_b = np.linalg.norm(lex_scores) + 1e-12
+            # lex_scores /= norm_b
 
-            # sgpt half
-            dense_docs, dense_scores = self.dense_retriever.retrieve(
-                queries = [query], 
-                topk = k2
-            )
-            dense_docs = dense_docs[0]
+            # # sgpt half
+            # dense_docs, dense_scores = self.dense_retriever.retrieve(
+            #     queries = [query], 
+            #     topk = k2
+            # )
+            # dense_docs = dense_docs[0]
             
-            # sgpt l2 normalization
-            dense_scores = np.array(dense_scores, dtype = float)
-            norm_s = np.linalg.norm(dense_scores) + 1e-12
-            dense_scores /= norm_s
+            # # sgpt l2 normalization
+            # dense_scores = np.array(dense_scores, dtype = float)
+            # norm_s = np.linalg.norm(dense_scores) + 1e-12
+            # dense_scores /= norm_s
 
-            # takes topk docs based on normalized score of dense and lex retrieval
-            merged = {}
-            alpha = self.retriever_ratio
-            for doc, score in zip(lex_docs, lex_scores):
-                merged[doc] = alpha * score
-            for doc, score in zip(dense_docs, dense_docs):
-                merged[doc] = merged.get(doc, 0.0) + (1 - alpha) * score
+            # # takes topk docs based on normalized score of dense and lex retrieval
+            # merged = {}
+            # alpha = self.retriever_ratio #should i decouple the split ratio and the weights?
+            # # alpha = self.retriever_score_weights
+            # for doc, score in zip(lex_docs, lex_scores):
+            #     merged[doc] = alpha * score
+            # for doc, score in zip(dense_docs, dense_scores):
+            #     merged[doc] = merged.get(doc, 0.0) + (1 - alpha) * score
             
-            sorted_merge = sorted(merged.items(), key = lambda n: n[1], reverse=True)
-            top = [doc  for doc,_ in sorted_merge[:topk]]
-            return top
+            # sorted_merge = sorted(merged.items(), key = lambda n: n[1], reverse=True)
+            # top = [doc  for doc,_ in sorted_merge[:topk]]
+            # return top
+
+            # implementation of two stage cascading retrieval 
+            # 1st stage: get top-k1 from BM25 -- broad context
+            _, lex_docs, _ = self.lex_retriever.retrieve([query], topk=k1, max_query_length = max_query_length)
+            lex_docs = lex_docs[0].tolist()
+
+            # 2nd stage: for each docs1[i], retrieve k2/k1 passages -- more specific retrieval
+            cascade_hits = []
+            for doc in lex_docs:
+                subquery = query + " " + doc[:200]  
+                _, dense_docs, _ = self.lex_retriever.retrieve(
+                    [subquery], topk = max(1, k2 // k1)
+                )
+                cascade_hits.extend(dense_docs[0])
+
+            all_cands = lex_docs + cascade_hits
+            return all_cands[:topk]
         else:
             raise NotImplementedError
     
@@ -323,6 +345,8 @@ class SingleRAG(BasicRAG):
         if self.use_counter == True:
             self.counter.add_generate(text, self.generator.tokenizer)
         return text
+        
+        
 
 
 class FixLengthRAG(BasicRAG):
@@ -546,6 +570,7 @@ class EntityRAG(TokenRAG):
 class AttnWeightRAG(BasicRAG):
     def __init__(self, args):
         super().__init__(args)
+        self.surprisal_threshold = getattr(args, "surprisal_threshold", 2.0)
     
     def modifier(self, text, tokens, attentions, weight):
         sentences = [sent.text.strip() for sent in nlp(text).sents]
@@ -672,32 +697,65 @@ class AttnWeightRAG(BasicRAG):
         return " ".join([x[1] for x in real_pairs])
         
     def inference(self, question, demo, case):
-        # assert self.query_formulation == "direct"
-        # print(question)
-        # print("#" * 20)
+        # calculate surprise score of each token,
+        # if the surprise score surpasses a threshold, trigger retrieval
         text = ""
         while True:
             old_len = len(text)
+            # build prompt
             prompt = "".join([d["case"]+"\n" for d in demo])
             tmp_li = [case, text]
             prompt += " ".join(s for s in tmp_li if len(s) > 0)
-            # print('####', prompt)
-            # prompt += case + " " + text
-            new_text, tokens, attns, logprobs, entropies = self.generator.generate_attn(
+
+            # gen logprobs
+            new_text, tokens, attns, logprobs, _ = self.generator.generate_attn(
                 prompt, 
                 self.generate_max_length, 
-                # self.attention_solver, 
-                use_entropy = self.method == "dragin", 
-                use_logprob = self.method == "attn_prob"
+                use_entropy = False, 
+                use_logprob = True
             )
-            weight = entropies if self.method == "dragin" else [-v for v in logprobs]
+            
+            # compute surprisal scores
+            surprisals = [-lp for lp in logprobs]
 
-            if self.use_counter == True:
-                self.counter.add_generate(new_text, self.generator.tokenizer)
-            hallucination, ptext, curr_tokens, curr_hit =  self.modifier(new_text, tokens, attns, weight)
+            # trigger retrieval if  surprisal exceeds threshold
+            ptext = new_text.strip()
+            curr_tokens = tokens
+            curr_hit = [1 if s > self.surprisal_threshold else 0 for s in surprisals]
+            if max(surprisals) > self.surprisal_threshold:
+                hallucination = True 
+            else:
+                hallucination = False
             
             if not hallucination:
                 text = text.strip() + " " + new_text.strip()
+            
+        # # assert self.query_formulation == "direct"
+        # # print(question)
+        # # print("#" * 20)
+        # text = ""
+        # while True:
+        #     old_len = len(text)
+        #     prompt = "".join([d["case"]+"\n" for d in demo])
+        #     tmp_li = [case, text]
+        #     prompt += " ".join(s for s in tmp_li if len(s) > 0)
+        #     # print('####', prompt)
+        #     # prompt += case + " " + text
+        #     new_text, tokens, attns, logprobs, entropies = self.generator.generate_attn(
+        #         prompt, 
+        #         self.generate_max_length, 
+        #         # self.attention_solver, 
+        #         use_entropy = self.method == "dragin", 
+        #         use_logprob = self.method == "attn_prob"
+        #     )
+        #     weight = entropies if self.method == "dragin" else [-v for v in logprobs]
+
+        #     if self.use_counter == True:
+        #         self.counter.add_generate(new_text, self.generator.tokenizer)
+        #     hallucination, ptext, curr_tokens, curr_hit =  self.modifier(new_text, tokens, attns, weight)
+            
+        #     if not hallucination:
+        #         text = text.strip() + " " + new_text.strip()
             else:
                 forward_all = [question, text, ptext]
                 forward_all = " ".join(s for s in forward_all if len(s) > 0)

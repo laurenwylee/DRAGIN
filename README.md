@@ -5,7 +5,9 @@ Implement a Hybrid Retriever with a retriever ratio in configuration to determin
 
 First experiments testing on Llama2-7b-chat and Vicuna-13b-v1.5 models using DRAGIN.
 
-First retriever ratio: 0.5
+result 0 - 7 with retriever ratio impl
+7-11 cascading retriever
+12 on is surprisal without retriever change
 ## Original
 
 **📢 January 18, 2025 Update, Important:**

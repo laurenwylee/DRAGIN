@@ -9,7 +9,7 @@
     "generate_max_length": 64,
     "query_formulation": "real_words",
     "retrieve_keep_top_k": 25,
-    "output_dir": "../result/llama2_7b_chat_2wikimultihopqa/2",
+    "output_dir": "../result/llama2_7b_chat_2wikimultihopqa/5",
     "retriever": "hybrid",
     "retriever_ratio": 0.3,
     "es_index_name": "wiki",
@@ -20,5 +20,5 @@
     "hallucination_threshold": 1.0,
     "check_real_words": true,
     "use_counter": true,
-    "config_path": "../config/Llama2-7b-chat/2WikiMultihopQA/DRAGIN_e.json"
+    "config_path": "../config/Llama2-7b-chat/2WikiMultihopQA/DRAGIN_03.json"
 }

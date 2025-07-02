@@ -11,7 +11,7 @@
     "retrieve_keep_top_k": 25,
     "output_dir": "../result/llama2_7b_chat_2wikimultihopqa/4",
     "retriever": "hybrid",
-    "retriever_ratio": 0.1,
+    "retriever_ratio": 0.8,
     "es_index_name": "wiki",
     "sgpt_model_name_or_path": "Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit",
     "sgpt_encode_file_path": "../sgpt/encode_result",
@@ -20,5 +20,5 @@
     "hallucination_threshold": 1.0,
     "check_real_words": true,
     "use_counter": true,
-    "config_path": "../config/Llama2-7b-chat/2WikiMultihopQA/DRAGIN_e.json"
+    "config_path": "../config/Llama2-7b-chat/2WikiMultihopQA/DRAGIN_06.json"
 }
