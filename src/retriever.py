@@ -1,4 +1,3 @@
-
 from typing import List, Dict, Tuple
 import os
 import time
@@ -278,9 +277,6 @@ class SGPT:
             att.append(1)
         # Add padding
         batch_tokens = self.tokenizer.pad(batch_tokens, padding=True, return_tensors="pt")
-
-        model_device = next(self.model.parameters()).device
-        batch_tokens = {k: v.to(model_device) for k, v in batch_tokens.items()}
         return batch_tokens
 
     def get_weightedmean_embedding(self, batch_tokens):
@@ -339,11 +335,6 @@ class SGPT:
             topk_indices_list.append(topk_indices.to('cpu') + prev_count)
             prev_count += p_rep.shape[0]
 
-        if len(topk_values_list) == 0:
-            empty_docs = [[] for _ in queries]
-            empty_scores = [[] for _ in queries]
-            return empty_docs, empty_scores
-
         all_topk_values = torch.cat(topk_values_list, dim=0)
         global_topk_values, global_topk_indices = torch.topk(all_topk_values, k=topk, dim=0)
 
@@ -361,6 +352,6 @@ class SGPT:
                 psg = self.docs[topk_indices_list[fid][rk][qid].item()]
                 docs.append(psg)
                 scores_i.append(score)
-            psgs.append(docs)
+            psgs.append(doc)
             scores.append(scores_i)
         return psgs, scores

@@ -5,9 +5,7 @@ Implement a Hybrid Retriever with a retriever ratio in configuration to determin
 
 First experiments testing on Llama2-7b-chat and Vicuna-13b-v1.5 models using DRAGIN.
 
-result 0 - 7 with retriever ratio impl
-7-11 cascading retriever
-12 on is surprisal without retriever change
+First retriever ratio: 0.5
 ## Original
 
 **📢 January 18, 2025 Update, Important:**
@@ -152,12 +150,6 @@ If you are using SGPT as the retriever, you should also include the following pa
 | `sgpt_model_name_or_path` | SGPT model                            | `Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit` |
 | `sgpt_encode_file_path`   | Folders to save SGPT encoding results | `../sgpt/encode_result`                                   |
 | `passage_file`            | Path to the Wikipedia dump            | `../data/dpr/psgs_w100.tsv`                               |
-
-If you are using hyrbid as the retriever, you should also include the additional BM25 parameters, the additional SGPT parameters, and the following parameters.
-
-| Parameter                 | Meaning                               | example                                                   |
-| ------------------------- | ------------------------------------- | --------------------------------------------------------- |
-| `retriever_ratio`         | Weight of BM25 over SGPT              | `0.5` |
 
 Here is the config file for using our approach to generate answers to the top 1000 questions of 2WikiMultihopQA using the model Llama-2-13b-chat.
 
