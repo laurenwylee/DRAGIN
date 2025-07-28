@@ -1,3 +1,4 @@
+
 import numpy as np
 import logging
 import spacy
@@ -6,6 +7,9 @@ from math import exp
 from scipy.special import softmax
 from retriever import BM25, SGPT
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+from spacy.lang.en.stop_words import STOP_WORDS
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
 
 logging.basicConfig(level=logging.INFO) 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,7 @@ class BasicGenerator:
         )
         self.model_config = AutoConfig.from_pretrained(model_name_or_path,
                     trust_remote_code = "falcon" in model_name_or_path)
+
         # 8bit quantization
         self.quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -52,7 +57,7 @@ class BasicGenerator:
         if return_logprobs:
             outputs = self.model.generate(
                 input_ids = input_ids, 
-                attention_mask = attention_mask,
+                # attention_mask = attention_mask,
                 max_new_tokens = max_length, 
                 return_dict_in_generate = True, 
                 output_scores = True,
@@ -87,7 +92,7 @@ class BasicGenerator:
 
         outputs = self.model.generate(
             input_ids = input_ids, 
-            attention_mask = attention_mask,
+            # attention_mask = attention_mask,
             max_new_tokens = max_length, 
             return_dict_in_generate = True, 
             output_scores = True,
@@ -192,6 +197,8 @@ class Counter:
 class BasicRAG:
     def __init__(self, args):
         args = args.__dict__ 
+        self.generated_prefix = ""
+        self.feedback_topk = getattr(self, "feedback_topk", 10)
         for k, v in args.items():
             setattr(self, k, v)
         self.generator = BasicGenerator(self.model_name_or_path)
@@ -226,6 +233,22 @@ class BasicRAG:
         
         self.counter = Counter()
 
+    @staticmethod
+    def extract_expansion_terms(doc_texts, n_terms=5):
+        """Return the top-n_terms TF·IDF tokens from a list of doc strings, or [] if none."""
+        vect = TfidfVectorizer(stop_words="english")
+        try:
+            X = vect.fit_transform(doc_texts)
+        except ValueError:
+            # no valid vocabulary (docs empty or all stop words)
+            return []
+        scores = X.sum(axis=0).A1
+        if scores.size == 0:
+            return []
+        terms = np.array(vect.get_feature_names_out())
+        top_idx = np.argsort(scores)[-n_terms:]
+        return terms[top_idx].tolist()
+
     def retrieve(self, query, topk=1, max_query_length=64):
         self.counter.retrieve += 1
         if self.retriever_type == "BM25":
@@ -233,6 +256,33 @@ class BasicRAG:
                 queries = [query], 
                 topk = topk, 
                 max_query_length = max_query_length,
+            )
+            # 1) Generate a focused sub-question
+            subq_prompt = (
+                f"You’re answering this question:\n{query}\n"  
+                f"So far you’ve written:\n{self.generated_prefix}\n"  
+                "What is the single most important question you still need to answer?"
+            )
+            subq, _, _ = self.generator.generate(subq_prompt, max_length=32)
+
+            # 2) Initial BM25 hits on that sub-question
+            init_docs = self.retriever.retrieve(
+                queries=[subq], 
+                topk=self.feedback_topk, 
+                max_query_length=max_query_length,
+            )[1][0]
+
+            # 3) Extract top expansion terms via TF·IDF
+            expansion_terms = self.extract_expansion_terms(init_docs, n_terms=5)
+
+            # 4) Build the final expanded query
+            final_query = f"{subq} " + " ".join(expansion_terms)
+
+            # 5) Do the real BM25 retrieval
+            _ids, docs, _scores = self.retriever.retrieve(
+                queries=[final_query],
+                topk=topk,
+                max_query_length=max_query_length,
             )
             return docs[0]
         elif self.retriever_type == "SGPT":
@@ -324,6 +374,7 @@ class BasicRAG:
         text, _, _ = self.generator.generate(prompt, self.generate_max_length)
         if self.use_counter == True:
             self.counter.add_generate(text, self.generator.tokenizer)
+        self.generated_prefix = text
         return text
     
 
@@ -344,6 +395,7 @@ class SingleRAG(BasicRAG):
         text, _, _ = self.generator.generate(prompt, self.generate_max_length)
         if self.use_counter == True:
             self.counter.add_generate(text, self.generator.tokenizer)
+        self.generated_prefix = text
         return text
         
         
@@ -359,6 +411,7 @@ class FixLengthRAG(BasicRAG):
         retrieve_question = question
         while True:
             old_len = len(text)
+            self.generated_prefix = text
             docs = self.retrieve(retrieve_question, topk=self.retrieve_topk)
             prompt = "".join([d["case"]+"\n" for d in demo])
             prompt += "Context:\n"
@@ -466,7 +519,7 @@ class TokenRAG(BasicRAG):
                     retrieve_question = " ".join(s for s in tmp_all if len(s) > 0)
                 else:
                     raise NotImplemented
-
+                self.generated_prefix = text
                 docs = self.retrieve(retrieve_question, topk=self.retrieve_topk)
                 prompt = "".join([d["case"]+"\n" for d in demo])
                 prompt += "Context:\n"
@@ -622,7 +675,7 @@ class AttnWeightRAG(BasicRAG):
         tokens_tmp = self.generator.tokenizer.convert_ids_to_tokens(input_ids[0])
         # Before line 545 in generate.py
         input_ids = input_ids.to(self.generator.model.device)
-        atten_tmp = self.generator.model(input_ids, output_attentions=True).attentions[-1][0]
+        # atten_tmp = self.generator.model(input_ids, output_attentions=True).attentions[-1][0]
         atten_tmp = self.generator.model(input_ids, output_attentions=True).attentions[-1][0]
 
         # merge tokens
@@ -697,65 +750,32 @@ class AttnWeightRAG(BasicRAG):
         return " ".join([x[1] for x in real_pairs])
         
     def inference(self, question, demo, case):
-        # calculate surprise score of each token,
-        # if the surprise score surpasses a threshold, trigger retrieval
+        # assert self.query_formulation == "direct"
+        # print(question)
+        # print("#" * 20)
         text = ""
         while True:
             old_len = len(text)
-            # build prompt
             prompt = "".join([d["case"]+"\n" for d in demo])
             tmp_li = [case, text]
             prompt += " ".join(s for s in tmp_li if len(s) > 0)
-
-            # gen logprobs
-            new_text, tokens, attns, logprobs, _ = self.generator.generate_attn(
+            # print('####', prompt)
+            # prompt += case + " " + text
+            new_text, tokens, attns, logprobs, entropies = self.generator.generate_attn(
                 prompt, 
                 self.generate_max_length, 
-                use_entropy = False, 
-                use_logprob = True
+                # self.attention_solver, 
+                use_entropy = self.method == "dragin", 
+                use_logprob = self.method == "attn_prob"
             )
-            
-            # compute surprisal scores
-            surprisals = [-lp for lp in logprobs]
+            weight = entropies if self.method == "dragin" else [-v for v in logprobs]
 
-            # trigger retrieval if  surprisal exceeds threshold
-            ptext = new_text.strip()
-            curr_tokens = tokens
-            curr_hit = [1 if s > self.surprisal_threshold else 0 for s in surprisals]
-            if max(surprisals) > self.surprisal_threshold:
-                hallucination = True 
-            else:
-                hallucination = False
+            if self.use_counter == True:
+                self.counter.add_generate(new_text, self.generator.tokenizer)
+            hallucination, ptext, curr_tokens, curr_hit =  self.modifier(new_text, tokens, attns, weight)
             
             if not hallucination:
                 text = text.strip() + " " + new_text.strip()
-            
-        # # assert self.query_formulation == "direct"
-        # # print(question)
-        # # print("#" * 20)
-        # text = ""
-        # while True:
-        #     old_len = len(text)
-        #     prompt = "".join([d["case"]+"\n" for d in demo])
-        #     tmp_li = [case, text]
-        #     prompt += " ".join(s for s in tmp_li if len(s) > 0)
-        #     # print('####', prompt)
-        #     # prompt += case + " " + text
-        #     new_text, tokens, attns, logprobs, entropies = self.generator.generate_attn(
-        #         prompt, 
-        #         self.generate_max_length, 
-        #         # self.attention_solver, 
-        #         use_entropy = self.method == "dragin", 
-        #         use_logprob = self.method == "attn_prob"
-        #     )
-        #     weight = entropies if self.method == "dragin" else [-v for v in logprobs]
-
-        #     if self.use_counter == True:
-        #         self.counter.add_generate(new_text, self.generator.tokenizer)
-        #     hallucination, ptext, curr_tokens, curr_hit =  self.modifier(new_text, tokens, attns, weight)
-            
-        #     if not hallucination:
-        #         text = text.strip() + " " + new_text.strip()
             else:
                 forward_all = [question, text, ptext]
                 forward_all = " ".join(s for s in forward_all if len(s) > 0)
@@ -796,6 +816,7 @@ class AttnWeightRAG(BasicRAG):
                 else:
                     raise NotImplemented
 
+                self.generated_prefix = text
                 docs = self.retrieve(retrieve_question, topk=self.retrieve_topk)
                 prompt = "".join([d["case"]+"\n" for d in demo])
                 prompt += "Context:\n"
@@ -829,3 +850,143 @@ class AttnWeightRAG(BasicRAG):
                 break
         # print("#" * 20)
         return text
+        # # calculate surprise score of each token,
+        # # if the surprise score surpasses a threshold, trigger retrieval
+        # text = ""
+        # while True:
+        #     old_len = len(text)
+        #     # build prompt
+        #     prompt = "".join([d["case"]+"\n" for d in demo])
+        #     tmp_li = [case, text]
+        #     prompt += " ".join(s for s in tmp_li if len(s) > 0)
+
+        #     # gen logprobs
+        #     new_text, tokens, attns, logprobs, _ = self.generator.generate_attn(
+        #         prompt, 
+        #         self.generate_max_length, 
+        #         use_entropy = False, 
+        #         use_logprob = True
+        #     )
+            
+        #     # compute surprisal scores
+        #     surprisals = [-lp for lp in logprobs]
+
+        #     # trigger retrieval if  surprisal exceeds threshold
+        #     ptext = new_text.strip()
+        #     curr_tokens = tokens
+        #     # curr_hit = [1 if s > self.surprisal_threshold else 0 for s in surprisals]
+        #     curr_hit = []
+        #     for tok, s in zip(tokens, surprisals):
+        #         hit = 1 if s > self.surprisal_threshold else 0
+        #         if tok.lower() in STOP_WORDS:
+        #             hit = 0 #ignore if stop words
+        #         curr_hit.append(hit)
+        #     hallucination = any(curr_hit)
+
+        #     if max(surprisals) > self.surprisal_threshold:
+        #         hallucination = True 
+        #     else:
+        #         hallucination = False
+            
+        #     if not hallucination:
+        #         text = text.strip() + " " + new_text.strip()
+            
+        # # # assert self.query_formulation == "direct"
+        # # # print(question)
+        # # # print("#" * 20)
+        # # text = ""
+        # # while True:
+        # #     old_len = len(text)
+        # #     prompt = "".join([d["case"]+"\n" for d in demo])
+        # #     tmp_li = [case, text]
+        # #     prompt += " ".join(s for s in tmp_li if len(s) > 0)
+        # #     # print('####', prompt)
+        # #     # prompt += case + " " + text
+        # #     new_text, tokens, attns, logprobs, entropies = self.generator.generate_attn(
+        # #         prompt, 
+        # #         self.generate_max_length, 
+        # #         # self.attention_solver, 
+        # #         use_entropy = self.method == "dragin", 
+        # #         use_logprob = self.method == "attn_prob"
+        # #     )
+        # #     weight = entropies if self.method == "dragin" else [-v for v in logprobs]
+
+        # #     if self.use_counter == True:
+        # #         self.counter.add_generate(new_text, self.generator.tokenizer)
+        # #     hallucination, ptext, curr_tokens, curr_hit =  self.modifier(new_text, tokens, attns, weight)
+            
+        # #     if not hallucination:
+        # #         text = text.strip() + " " + new_text.strip()
+        #     else:
+        #         forward_all = [question, text, ptext]
+        #         forward_all = " ".join(s for s in forward_all if len(s) > 0)
+
+        #         def fetch_last_n_tokens(text, num, tokenizer = self.generator.tokenizer):
+        #             tokens = tokenizer.tokenize(text)
+        #             if num >= len(tokens):
+        #                 return text
+        #             last_n_tokens = tokens[-num:]
+        #             last_n_sentence = ' '.join(last_n_tokens)
+        #             return last_n_sentence
+
+        #         if self.query_formulation == "current":
+        #             retrieve_question = " ".join(curr_tokens)
+
+        #         elif self.query_formulation == "current_wo_wrong":
+        #             retrieve_question = " ".join(
+        #                 list(curr_tokens[i] if curr_hit[i] == 0 else "" for i in range(len(curr_tokens)))
+        #             )
+
+        #         elif self.query_formulation == "forward_all":
+        #             retrieve_question = forward_all
+                
+        #         elif self.query_formulation == "last_sentence":
+        #             retrieve_question = self.get_last_sentence(forward_all)
+                
+        #         elif self.query_formulation == "last_n_tokens":
+        #             assert "retrieve_keep_top_k" in self.__dict__
+        #             retrieve_question = fetch_last_n_tokens(
+        #                 forward_all, self.retrieve_keep_top_k)
+                
+        #         elif self.query_formulation == "real_words": 
+        #             retrieve_question = self.keep_real_words(
+        #                 prev_text = question + " " + text + " " + ptext, 
+        #                 curr_tokens = curr_tokens, 
+        #                 curr_hit = curr_hit,
+        #             ) 
+        #         else:
+        #             raise NotImplemented
+
+        #         docs = self.retrieve(retrieve_question, topk=self.retrieve_topk)
+        #         prompt = "".join([d["case"]+"\n" for d in demo])
+        #         prompt += "Context:\n"
+        #         for i, doc in enumerate(docs):
+        #             prompt += f"[{i+1}] {doc}\n"
+        #         prompt += "Answer in the same format as before.\n"
+        #         tmp_li = [case, text, ptext.strip()]
+        #         prompt += " ".join(s for s in tmp_li if len(s) > 0)
+        #         # print('#####', prompt)
+        #         # prompt += case + " " + text + " " + ptext.strip()
+        #         new_text, _, _ = self.generator.generate(prompt, self.generate_max_length)
+        #         if self.use_counter == True:
+        #             self.counter.add_generate(new_text, self.generator.tokenizer)
+        #             self.counter.hallucinated += 1
+        #         new_text = self.get_top_sentence(new_text)
+        #         tmp_li = [text.strip(), ptext.strip(), new_text.strip()]
+        #         text = " ".join(s for s in tmp_li if len(s) > 0)
+        #         # text = text.strip() + " " + ptext.strip() + " " + new_text.strip()
+
+        #         # print("### retrieve_question ###")
+        #         # print(retrieve_question)
+        #         # context = "### Context: ###\n"
+        #         # for i, doc in enumerate(docs):
+        #         #     context += f"[{i+1}] {doc}\n" 
+        #         # print(context)
+        #         # print(text)
+            
+        #     # 判断 token 的个数要少于 generate_max_length 
+        #     tokens_count = len(self.generator.tokenizer.encode(text))
+        #     if tokens_count > self.generate_max_length or len(text) <= old_len or "the answer is" in text:
+        #         break
+        # # print("#" * 20)
+        # return text
