@@ -6,6 +6,7 @@ from math import exp
 from scipy.special import softmax
 from retriever import BM25, SGPT
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+from spacy.lang.en.stop_words import STOP_WORDS
 
 logging.basicConfig(level=logging.INFO) 
 logger = logging.getLogger(__name__)
@@ -226,13 +227,40 @@ class BasicRAG:
         
         self.counter = Counter()
 
-    def retrieve(self, query, topk=1, max_query_length=64):
+    def retrieve(self, query, topk=1, max_query_length=64, surprise_k = 7):
         self.counter.retrieve += 1
         if self.retriever_type == "BM25":
-            _docs_ids, docs, _ = self.retriever.retrieve(
-                queries = [query], 
-                topk = topk, 
-                max_query_length = max_query_length,
+            # 1) Encode the query and get model logits
+            tokenizer = self.generator.tokenizer
+            model = self.generator.model
+            input_ids = tokenizer.encode(query, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                outputs = model(input_ids, labels=input_ids)
+                logits = outputs.logits  # shape: (1, seq_len, vocab_size)
+
+            # 2) Compute log-probs and surprisals
+            log_probs = torch.log_softmax(logits, dim=-1)  # (1, seq_len, vocab_size)
+            token_logps = log_probs.gather(2, input_ids.unsqueeze(-1)).squeeze(-1).squeeze(0)
+            surprisals = -token_logps.cpu().numpy()  # (seq_len,)
+
+            # 3) Map to tokens and filter
+            tokens = tokenizer.convert_ids_to_tokens(input_ids.squeeze(0))
+            pairs = [(s, t) for s, t in zip(surprisals, tokens)
+                     if t.isalnum() and t.lower() not in STOP_WORDS]
+
+            # 4) Select top-surprise_k by surprisal
+            if not pairs:
+                query_text = query
+            else:
+                pairs.sort(key=lambda x: x[0], reverse=True)
+                top_tokens = [tok for _, tok in pairs[:surprise_k]]
+                query_text = " ".join(top_tokens)
+
+            # 5) BM25 search on the selected tokens
+            _, docs, _ = self.retriever.retrieve(
+                queries=[query_text],
+                topk=topk,
+                max_query_length=max_query_length,
             )
             return docs[0]
         elif self.retriever_type == "SGPT":
@@ -278,9 +306,9 @@ class BasicRAG:
             for doc, score in zip(dense_docs, dense_docs):
                 merge[doc] = merge.get(doc, 0.0) + (1 - alpha) * score
 
-           sorted_merge = sorted(merge.items(), key = lambda n: n[1], reverse=True)
-           top = [doc  for doc,_ in sorted_merge[:topk]]
-           return top
+            sorted_merge = sorted(merge.items(), key = lambda n: n[1], reverse=True)
+            top = [doc  for doc,_ in sorted_merge[:topk]]
+            return top
         else:
             raise NotImplementedError
     
